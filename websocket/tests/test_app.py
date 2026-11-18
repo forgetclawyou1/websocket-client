@@ -996,8 +996,9 @@ class WebSocketAppTest(unittest.TestCase):
         app.run_forever(ping_interval=2, ping_timeout=1, reconnect=3)
 
         self.assertEqual(pong_count, 2)
-        self.assertIsInstance(exc, ws.WebSocketTimeoutException)
-        self.assertEqual(str(exc), "ping/pong timed out")
+        # The read loop notices the closed socket at once and reports it; it
+        # no longer sleeps through the close until the ping/pong timeout.
+        self.assertIsInstance(exc, ws.WebSocketConnectionClosedException)
 
     def test_dispatcher_selection_default(self):
         """Test default dispatcher selection"""
