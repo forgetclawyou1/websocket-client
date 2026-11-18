@@ -1,4 +1,5 @@
 import inspect
+import math
 import socket
 import threading
 import time
@@ -378,11 +379,23 @@ class WebSocketApp:
 
         if reconnect is None:
             reconnect = RECONNECT
+        elif not reconnect >= 0:
+            # A negative (or NaN) delay ended the run at the first drop on the
+            # built-in dispatchers (time.sleep raised) and reconnected in a
+            # tight loop with rel. Keep the built-in outcome everywhere.
+            warning(f"reconnect={reconnect!r} is not a delay >= 0; not reconnecting")
+            reconnect = 0
 
         if ping_timeout is not None and ping_timeout <= 0:
             raise WebSocketException("Ensure ping_timeout > 0")
         if ping_interval is not None and ping_interval < 0:
             raise WebSocketException("Ensure ping_interval >= 0")
+        # inf/nan crash select() as a ping_timeout, and a nan ping_interval
+        # sends PINGs in a tight loop.
+        if ping_timeout is not None and not math.isfinite(ping_timeout):
+            raise WebSocketException("Ensure ping_timeout is a finite number")
+        if ping_interval is not None and math.isnan(ping_interval):
+            raise WebSocketException("Ensure ping_interval is a number")
         if ping_timeout and ping_interval and ping_interval <= ping_timeout:
             raise WebSocketException("Ensure ping_interval > ping_timeout")
         if redirect_limit < 0:
@@ -512,7 +525,9 @@ class WebSocketApp:
 
                 info("Websocket connected")
 
-                if self.ping_interval:
+                # An infinite interval never pings (its wait() used to crash
+                # the ping thread).
+                if self.ping_interval and math.isfinite(self.ping_interval):
                     self._start_ping_thread()
 
                 if reconnecting and self.on_reconnect:

@@ -1104,6 +1104,63 @@ class WebSocketAppUnitTests(unittest.TestCase):
         with self.assertRaises(ws.WebSocketException):
             app.run_forever(ping_interval=1, ping_timeout=1)
 
+        # inf/nan crashed select() as a ping_timeout; a nan interval flooded
+        # the server with PINGs (N163)
+        for options in (
+            {"ping_timeout": float("inf")},
+            {"ping_timeout": float("nan")},
+            {"ping_interval": float("nan")},
+            {"ping_interval": float("nan"), "ping_timeout": 5},
+        ):
+            with self.subTest(**options):
+                # the harness keeps a regression off the network
+                harness = RunForeverHarness(
+                    script=[ws.WebSocketConnectionClosedException("dropped")]
+                )
+                with harness, self.assertRaises(ws.WebSocketException):
+                    app.run_forever(**options)
+
+    def test_infinite_ping_interval_sends_no_pings(self):
+        """ping_interval=inf never pings, as before, without starting a ping
+        thread whose wait(inf) crashed with OverflowError (N163)."""
+        app = ws.WebSocketApp("ws://example.com/")
+        harness = RunForeverHarness(
+            script=[ws.WebSocketConnectionClosedException("dropped")]
+        )
+        with harness, mock.patch.object(app, "_start_ping_thread") as start:
+            app.run_forever(ping_interval=float("inf"), ping_timeout=5)
+        start.assert_not_called()
+        self.assertEqual(len(harness.connections), 1)
+
+    def test_invalid_reconnect_delay_does_not_reconnect(self):
+        """A negative or NaN reconnect ended the run at the first drop with the
+        built-in dispatcher (time.sleep raised) and reconnected in a tight
+        loop with rel (N64). It now means no reconnect, with a warning."""
+        for delay in (-1, float("nan")):
+            with self.subTest(reconnect=delay):
+                events = []
+                app = ws.WebSocketApp(
+                    "ws://example.com/",
+                    on_reconnect=lambda app: events.append("reconnect"),
+                    on_close=lambda app, code, reason: events.append("close"),
+                )
+                harness = RunForeverHarness(
+                    script=[ws.WebSocketConnectionClosedException("dropped")]
+                )
+                fake_sleep = harness.clock.sleep
+
+                def sleep(seconds, app=app, harness=harness, fake=fake_sleep):
+                    fake(seconds)
+                    if len(harness.connections) > 2:
+                        app.close()  # a regression reconnects: stop it
+
+                harness.clock.sleep = sleep
+                with harness, self.assertLogs("websocket", "WARNING") as logs:
+                    self.assertTrue(app.run_forever(reconnect=delay))
+                self.assertEqual(len(harness.connections), 1)
+                self.assertEqual(events, ["close"])
+                self.assertIn("not reconnecting", logs.output[0])
+
     def test_run_forever_redirect_limit_zero_refuses_redirects(self):
         """run_forever(redirect_limit=0) does not follow a redirect to another
         host, and a negative limit is rejected; the default still follows it."""
