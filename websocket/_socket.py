@@ -1,8 +1,9 @@
 import errno
 import selectors
 import math
+import operator
 import socket
-from typing import Optional, Union, Any
+from typing import Optional, SupportsIndex, Union, Any
 
 from ._exceptions import (
     WebSocketConnectionClosedException,
@@ -73,20 +74,31 @@ class sock_opt:
         self.timeout: Optional[Union[int, float]] = None
 
 
-def _validate_timeout(timeout: Optional[Union[int, float]]) -> None:
-    """Reject timeouts that the socket layer would misread or reject late."""
+def _validate_timeout(
+    timeout: Optional[Union[int, float, SupportsIndex]],
+) -> Optional[Union[int, float]]:
+    """Reject timeouts that the socket layer would misread or reject late, and
+    return the timeout to store: an int-like value (numpy.int64, any type with
+    __index__, as socket.settimeout accepts) becomes an int."""
     if timeout is None:
-        return
-    # bool subclasses int; True would become 1.0s on the socket
-    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
-        raise TypeError(
-            "timeout must be an int or float, not %r" % (type(timeout).__name__,)
-        )
+        return None
+    # bool subclasses int (and has __index__); True would become 1.0s on the
+    # socket, so it is rejected before any conversion.
+    if isinstance(timeout, bool):
+        raise TypeError("timeout must be an int or float, not 'bool'")
+    if not isinstance(timeout, (int, float)):
+        try:
+            timeout = operator.index(timeout)
+        except TypeError:
+            raise TypeError(
+                "timeout must be an int or float, not %r" % (type(timeout).__name__,)
+            ) from None
     if not math.isfinite(timeout):
         raise ValueError("timeout must be a finite number, got %r" % (timeout,))
+    return timeout
 
 
-def setdefaulttimeout(timeout: Optional[Union[int, float]]) -> None:
+def setdefaulttimeout(timeout: Optional[Union[int, float, SupportsIndex]]) -> None:
     """
     Set the global timeout setting to connect.
 
@@ -97,8 +109,7 @@ def setdefaulttimeout(timeout: Optional[Union[int, float]]) -> None:
         None clears the default timeout.
     """
     global _default_timeout
-    _validate_timeout(timeout)
-    _default_timeout = timeout
+    _default_timeout = _validate_timeout(timeout)
 
 
 def getdefaulttimeout() -> Optional[Union[int, float]]:

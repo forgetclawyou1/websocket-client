@@ -11,6 +11,7 @@ import time
 import unittest
 from base64 import decodebytes as base64decode
 from base64 import encodebytes as base64encode
+from decimal import Decimal
 from unittest import mock
 
 import websocket as ws
@@ -91,6 +92,42 @@ class WebSocketTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 ws.setdefaulttimeout(value)
         ws.setdefaulttimeout(None)
+
+    def test_int_like_timeouts_are_accepted(self):
+        """Types with __index__ (numpy.int64) worked in 1.9.2 and work with
+        socket.settimeout; they are stored as int. Other non-numbers and bool
+        stay rejected."""
+
+        class IntLike:
+            def __index__(self):
+                return 7
+
+        self.addCleanup(ws.setdefaulttimeout, None)
+        ws.setdefaulttimeout(IntLike())
+        self.assertEqual(ws.getdefaulttimeout(), 7)
+        self.assertIs(type(ws.getdefaulttimeout()), int)
+
+        sock = ws.WebSocket()
+        sock.settimeout(IntLike())
+        self.assertIs(type(sock.gettimeout()), int)
+        self.assertEqual(sock.gettimeout(), 7)
+
+        sock = ws.WebSocket()
+        caller_socket = mock.Mock()
+        with mock.patch(
+            "websocket._core.connect", side_effect=RuntimeError("stop")
+        ) as connect_mock:
+            with self.assertRaises(RuntimeError):
+                sock.connect("ws://origin/", timeout=IntLike(), socket=caller_socket)
+        self.assertEqual(connect_mock.call_args[0][1].timeout, 7)
+        caller_socket.settimeout.assert_called_once_with(7)
+
+        for value in (True, False, Decimal("1.5"), "1"):
+            with self.subTest(value=value):
+                with self.assertRaises(TypeError):
+                    ws.setdefaulttimeout(value)
+                with self.assertRaises(TypeError):
+                    ws.WebSocket().settimeout(value)
 
     def test_ws_key(self):
         key = _create_sec_websocket_key()

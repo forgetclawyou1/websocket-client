@@ -2,7 +2,7 @@ import socket
 import struct
 import threading
 import time
-from typing import Any, Callable, Optional, Type, Union
+from typing import Any, Callable, Optional, SupportsIndex, Type, Union
 from urllib.parse import urlparse
 
 # websocket modules
@@ -234,7 +234,7 @@ class WebSocket:
         """
         return self.sock_opt.timeout
 
-    def settimeout(self, timeout: Optional[Union[float, int]]) -> None:
+    def settimeout(self, timeout: Optional[Union[float, int, SupportsIndex]]) -> None:
         """
         Set the timeout to the websocket.
 
@@ -244,7 +244,7 @@ class WebSocket:
             timeout time (in seconds). This value could be either float/integer.
             None disables the timeout (blocking mode).
         """
-        _validate_timeout(timeout)
+        timeout = _validate_timeout(timeout)
         self.sock_opt.timeout = timeout
         if self.sock:
             self.sock.settimeout(timeout)
@@ -346,7 +346,7 @@ class WebSocket:
             applied to it; without one it keeps its own.
         """
         if "timeout" in options:
-            _validate_timeout(options["timeout"])
+            options["timeout"] = _validate_timeout(options["timeout"])
         if options.get("redirect_limit") is None and "redirect_limit" in options:
             raise WebSocketException("Ensure redirect_limit is an integer")
         self.sock_opt.timeout = options.get("timeout", self.sock_opt.timeout)
@@ -766,7 +766,7 @@ class WebSocket:
 
 def create_connection(
     url: str,
-    timeout: Optional[Union[float, int]] = None,
+    timeout: Optional[Union[float, int, SupportsIndex]] = None,
     class_: Type[WebSocket] = WebSocket,
     **options: Any,
 ) -> WebSocket:
