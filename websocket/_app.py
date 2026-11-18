@@ -178,6 +178,9 @@ class WebSocketApp:
         self.has_done_teardown = False
         self.has_done_teardown_lock = threading.Lock()
         self.last_close_frame: Optional[ABNF] = None
+        # Held by close() until the server's CLOSE is stored; teardown waits.
+        # Re-entrant: a signal handler may call close() during close().
+        self._close_lock = threading.RLock()
 
     def send(self, data: Union[bytes, str], opcode: int = ABNF.OPCODE_TEXT) -> None:
         """
@@ -213,14 +216,25 @@ class WebSocketApp:
         """
         Close websocket connection.
         """
-        self.keep_running = False
-        sock = self.sock
-        if sock:
-            sock.close(**kwargs)
-            # Capture the peer's close frame before clearing socket reference
-            if sock.close_frame is not None:
-                self.last_close_frame = sock.close_frame
-            self.sock = None
+        # Hold the lock until the server's CLOSE is stored: teardown() waits
+        # for it, so on_close gets the server's code even when run_forever's
+        # thread sees keep_running go False first. If another thread is
+        # already closing, leave it to that thread: waiting here would hang
+        # this caller too when that close() is stuck in a blocked send.
+        if not self._close_lock.acquire(blocking=False):
+            self.keep_running = False
+            return
+        try:
+            self.keep_running = False
+            sock = self.sock
+            if sock:
+                sock.close(**kwargs)
+                # Capture the peer's close frame before clearing socket reference
+                if sock.close_frame is not None:
+                    self.last_close_frame = sock.close_frame
+                self.sock = None
+        finally:
+            self._close_lock.release()
 
     def _start_ping_thread(self) -> None:
         self.last_ping_tm = self.last_pong_tm = float(0)
@@ -386,7 +400,7 @@ class WebSocketApp:
         # The caller-supplied socket the last connection attempt used.
         used_socket = None
 
-        def teardown(close_frame: Optional[ABNF] = None) -> None:
+        def teardown(close_frame: Optional[ABNF] = None, wait: bool = True) -> None:
             """
             Tears down the connection.
 
@@ -395,6 +409,10 @@ class WebSocketApp:
             close_frame: ABNF frame
                 If close_frame is set, the on_close handler is invoked
                 with the statusCode and reason from the provided frame.
+            wait: bool
+                Wait for an app.close() running in another thread to store
+                the server's CLOSE. False when tearing down on Ctrl-C or
+                SystemExit.
             """
 
             # teardown() is called in many code paths to ensure resources are cleaned up and on_close is fired.
@@ -403,6 +421,20 @@ class WebSocketApp:
                 if self.has_done_teardown:
                     return
                 self.has_done_teardown = True
+
+            # An app.close() in another thread stores the server's CLOSE under
+            # this lock; wait for it so on_close reports the server's code.
+            # Bounded (close() waits 3 s for the reply by default), so a close()
+            # stuck in a blocked send cannot hold run_forever too. A signal can
+            # interrupt the wait (Ctrl-C, or SystemExit from a handler): finish
+            # the teardown first, so on_close still runs, then re-raise.
+            interrupted: Optional[BaseException] = None
+            if close_frame is None and wait:
+                try:
+                    if self._close_lock.acquire(timeout=4):
+                        self._close_lock.release()
+                except BaseException as e:
+                    interrupted = e
 
             self._stop_ping_thread()
             self.keep_running = False
@@ -425,6 +457,8 @@ class WebSocketApp:
             )
             # Finally call the callback AFTER all teardown is complete
             self._callback(self.on_close, close_status_code, close_reason)
+            if interrupted is not None:
+                raise interrupted
 
         def initialize_socket(reconnecting: bool = False) -> None:
             nonlocal used_socket
@@ -611,7 +645,8 @@ class WebSocketApp:
             self._callback(self.on_error, e)
 
             if isinstance(e, (KeyboardInterrupt, SystemExit)):
-                teardown(close_frame)
+                # Exit now: do not wait for a close() in another thread.
+                teardown(close_frame, wait=False)
                 # Propagate further
                 raise
 
@@ -658,7 +693,7 @@ class WebSocketApp:
                     dispatcher.reconnect(reconnect, initialize_socket)
         except (KeyboardInterrupt, Exception) as e:
             info(f"tearing down on exception {e!r}")
-            teardown()
+            teardown(wait=not isinstance(e, KeyboardInterrupt))
             if isinstance(e, KeyboardInterrupt):
                 raise
         finally:

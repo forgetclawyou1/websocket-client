@@ -1,17 +1,20 @@
 # -*- coding: utf-8 -*-
 #
+import base64
+import hashlib
 import os
 import os.path
 import socket
 import ssl
 import struct
 import threading
+import time
 import unittest
 from unittest import mock
 
 import websocket as ws
 from websocket._abnf import ABNF
-from websocket.tests._fakes import RunForeverHarness
+from websocket.tests._fakes import FakePeer, RunForeverHarness
 
 """
 test_app.py
@@ -38,6 +41,31 @@ TEST_WITH_INTERNET = os.environ.get("TEST_WITH_INTERNET", "0") == "1"
 LOCAL_WS_SERVER_PORT = os.environ.get("LOCAL_WS_SERVER_PORT", "-1")
 TEST_WITH_LOCAL_SERVER = LOCAL_WS_SERVER_PORT != "-1"
 TRACEABLE = True
+
+
+def answer_handshake(fake):
+    """Answer the client's opening handshake on a FakePeer."""
+    request = b""
+    while b"\r\n\r\n" not in request:
+        request += fake.peer.recv(4096)
+    key = next(
+        line.split(b":", 1)[1].strip()
+        for line in request.split(b"\r\n")
+        if line.lower().startswith(b"sec-websocket-key:")
+    )
+    accept = base64.b64encode(
+        hashlib.sha1(key + b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11").digest()
+    )
+    fake.send_raw(
+        b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n"
+        b"Connection: Upgrade\r\nSec-WebSocket-Accept: " + accept + b"\r\n\r\n"
+    )
+
+
+def answer_handshake_then_echo_close(fake):
+    """Answer the handshake, then echo the client's CLOSE."""
+    answer_handshake(fake)
+    fake.send_frame(*fake.read_frame())
 
 
 class WebSocketAppTest(unittest.TestCase):
@@ -604,6 +632,159 @@ class WebSocketAppTest(unittest.TestCase):
         self.assertNotIn(True, harness.read_results)
         # dropped, then two connections that each end at the server's CLOSE
         self.assertEqual(len(harness.connections), 3)
+
+    def test_close_from_another_thread_returns_promptly_with_peer_code(self):
+        """app.close() from another thread (N60, #612): run_forever must return
+        at once and on_close must get the server's close code. The run_forever
+        thread used to miss its wake-up when close() closed the socket under its
+        select() (a stall of up to ping_timeout or 10 s), and to run teardown
+        before close() had stored the server's CLOSE (on_close(None, None))."""
+
+        def serve(fake):
+            answer_handshake(fake)
+            opcode, payload = fake.read_frame()  # the client's CLOSE
+            fake.send_frame(opcode, payload)
+            time.sleep(0.3)  # a server that closes TCP a little later
+            fake.peer.close()
+
+        for run in range(20):  # the old failures were races, most runs hit one
+            with self.subTest(run=run):
+                fake = FakePeer(timeout=5)
+                self.addCleanup(fake.close)
+                threading.Thread(target=serve, args=(fake,), daemon=True).start()
+                opened, closes = threading.Event(), []
+                app = ws.WebSocketApp(
+                    "ws://example.com/",
+                    socket=fake.client,
+                    on_open=lambda app: opened.set(),
+                    on_close=lambda app, code, reason: closes.append(code),
+                )
+                runner = threading.Thread(target=app.run_forever, daemon=True)
+                runner.start()
+                self.assertTrue(opened.wait(2))
+                app.close()
+                runner.join(2)
+                self.assertFalse(runner.is_alive())
+                self.assertEqual(closes, [1000])
+
+    def test_close_reentered_on_the_same_thread_does_not_deadlock(self):
+        """A signal handler that calls close() while close() is still running
+        on the same thread (for example from on_message) must not deadlock on
+        the lock close() holds until the server's CLOSE is stored."""
+        app = ws.WebSocketApp("ws://example.com/")
+        sock = mock.Mock(close_frame=None)
+        # the first WebSocket.close() is interrupted by a second app.close()
+        sock.close.side_effect = lambda **kw: (
+            app.close() if sock.close.call_count == 1 else None
+        )
+        app.sock = sock
+        closer = threading.Thread(target=app.close, daemon=True)
+        closer.start()
+        closer.join(2)
+        self.assertFalse(closer.is_alive())
+        self.assertIsNone(app.sock)
+
+    def test_close_returns_while_another_thread_is_closing(self):
+        """A close() while another thread's close() is still running must not
+        wait for it: that close() can be stuck behind a send that never
+        finishes, and a watchdog's close() would hang too. app.sock stays set,
+        so app.sock.shutdown() can still free the stuck threads."""
+        app = ws.WebSocketApp("ws://example.com/")
+        app.keep_running = True
+        stuck = threading.Event()
+        self.addCleanup(stuck.set)
+        entered = threading.Event()
+        sock = mock.Mock(close_frame=None)
+        sock.close.side_effect = lambda **kw: (entered.set(), stuck.wait(5))
+        app.sock = sock
+        threading.Thread(target=app.close, daemon=True).start()
+        self.assertTrue(entered.wait(2))
+        second = threading.Thread(target=app.close, daemon=True)
+        second.start()
+        second.join(1)
+        self.assertFalse(second.is_alive())
+        self.assertFalse(app.keep_running)
+        self.assertIs(app.sock, sock)
+        self.assertEqual(sock.close.call_count, 1)
+
+    def test_signal_during_teardown_wait_still_calls_on_close(self):
+        """Ctrl-C, or SystemExit from a signal handler, can interrupt
+        teardown's wait for an app.close() in another thread. on_close must
+        still run, and the exception must reach run_forever's caller."""
+
+        class InterruptedLock:
+            """The signal lands in teardown's timed acquire()."""
+
+            def __init__(self, exc):
+                self.exc = exc
+
+            def acquire(self, blocking=True, timeout=-1):
+                if timeout != -1:
+                    raise self.exc
+                return True
+
+            def release(self):
+                pass
+
+            __enter__ = acquire
+
+            def __exit__(self, *exc_info):
+                pass
+
+        for exc in (KeyboardInterrupt, SystemExit):
+            with self.subTest(exc=exc.__name__):
+                fake = FakePeer(timeout=5)
+                self.addCleanup(fake.close)
+                threading.Thread(
+                    target=answer_handshake_then_echo_close, args=(fake,), daemon=True
+                ).start()
+                closes = []
+                app = ws.WebSocketApp(
+                    "ws://example.com/",
+                    socket=fake.client,
+                    on_open=lambda app: app.close(),
+                    on_close=lambda app, code, reason: closes.append(code),
+                )
+                app._close_lock = InterruptedLock(exc())
+                with self.assertRaises(exc):
+                    app.run_forever()
+                self.assertEqual(closes, [1000])
+
+    def test_ctrl_c_does_not_wait_for_another_threads_close(self):
+        """Ctrl-C that reaches run_forever before teardown must end it at once,
+        not wait up to 4 s for an app.close() still running in another
+        thread."""
+        fake = FakePeer(timeout=5)
+        self.addCleanup(fake.close)
+        threading.Thread(
+            target=answer_handshake_then_echo_close, args=(fake,), daemon=True
+        ).start()
+
+        def ctrl_c(app):
+            raise KeyboardInterrupt
+
+        closes = []
+        app = ws.WebSocketApp(
+            "ws://example.com/",
+            socket=fake.client,
+            on_open=ctrl_c,
+            on_close=lambda app, code, reason: closes.append(code),
+        )
+        held, release = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+
+        def other_close():  # holds the lock like a close() awaiting the reply
+            with app._close_lock:
+                held.set()
+                release.wait(10)
+
+        threading.Thread(target=other_close, daemon=True).start()
+        self.assertTrue(held.wait(2))
+        start = time.monotonic()
+        with self.assertRaises(KeyboardInterrupt):
+            app.run_forever()
+        self.assertLess(time.monotonic() - start, 1)
+        self.assertEqual(closes, [None])
 
     def test_close_during_reconnect_backoff_ends_run(self):
         """close() while run_forever waits to reconnect (N59) must end the run

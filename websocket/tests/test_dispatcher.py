@@ -144,9 +144,9 @@ class DispatcherTest(unittest.TestCase):
         mock_sock = Mock()
 
         # Mock the selector to control the loop
-        with patch("selectors.DefaultSelector") as mock_selector_class:
+        with patch.object(DispatcherBase, "_selector") as make_selector:
             mock_selector = Mock()
-            mock_selector_class.return_value = mock_selector
+            make_selector.return_value = mock_selector
 
             # Make select return immediately (timeout)
             mock_selector.select.return_value = []
@@ -161,7 +161,7 @@ class DispatcherTest(unittest.TestCase):
             dispatcher.read(mock_sock, read_callback, check_callback)
 
             # Verify selector was used correctly
-            mock_selector.register.assert_called()
+            make_selector.assert_called_once_with(self.app.sock.sock)
             mock_selector.select.assert_called_with(5.0)
             mock_selector.close.assert_called()
             check_callback.assert_called()
@@ -173,9 +173,9 @@ class DispatcherTest(unittest.TestCase):
         check_callback = Mock()
         mock_sock = Mock()
 
-        with patch("selectors.DefaultSelector") as mock_selector_class:
+        with patch.object(DispatcherBase, "_selector") as make_selector:
             mock_selector = Mock()
-            mock_selector_class.return_value = mock_selector
+            make_selector.return_value = mock_selector
 
             # First call returns data, second call stops the loop
             call_count = 0
@@ -206,9 +206,9 @@ class DispatcherTest(unittest.TestCase):
         mock_ssl_sock = MockSocket()
         self.app.sock.sock = mock_ssl_sock
 
-        with patch("selectors.DefaultSelector") as mock_selector_class:
+        with patch.object(DispatcherBase, "_selector") as make_selector:
             mock_selector = Mock()
-            mock_selector_class.return_value = mock_selector
+            make_selector.return_value = mock_selector
             mock_selector.select.return_value = []
 
             # Stop after first iteration
@@ -220,7 +220,7 @@ class DispatcherTest(unittest.TestCase):
 
             dispatcher.read(None, read_callback, check_callback)
 
-            mock_selector.register.assert_called()
+            make_selector.assert_called_once_with(mock_ssl_sock)
             check_callback.assert_called()
 
     def test_ssl_dispatcher_select_with_pending(self):

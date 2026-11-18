@@ -45,6 +45,15 @@ class DispatcherBase:
             time.sleep(seconds)
         callback()
 
+    def _selector(self, sock: Any) -> selectors.BaseSelector:
+        """A selector that wakes up when another thread closes sock (as
+        WebSocketApp.close() does). epoll and kqueue drop a pending event when
+        the socket is closed under them, so a select() could sleep through
+        the close until its timeout; poll() reports the closed socket."""
+        sel = getattr(selectors, "PollSelector", selectors.DefaultSelector)()
+        sel.register(sock, selectors.EVENT_READ)
+        return sel
+
     def reconnect(self, seconds: int, reconnector: Callable) -> None:
         try:
             info(
@@ -80,8 +89,7 @@ class Dispatcher(DispatcherBase):
     ) -> None:
         if self.app.sock is None or self.app.sock.sock is None:
             return
-        sel = selectors.DefaultSelector()
-        sel.register(self.app.sock.sock, selectors.EVENT_READ)
+        sel = self._selector(self.app.sock.sock)
         try:
             while self.app.keep_running:
                 if sel.select(self.ping_timeout):
@@ -106,8 +114,7 @@ class SSLDispatcher(DispatcherBase):
         if self.app.sock is None or self.app.sock.sock is None:
             return
         sock = self.app.sock.sock
-        sel = selectors.DefaultSelector()
-        sel.register(sock, selectors.EVENT_READ)
+        sel = self._selector(sock)
         try:
             while self.app.keep_running:
                 if self.select(sock, sel):
@@ -117,7 +124,7 @@ class SSLDispatcher(DispatcherBase):
         finally:
             sel.close()
 
-    def select(self, sock: Any, sel: selectors.DefaultSelector) -> Any:
+    def select(self, sock: Any, sel: selectors.BaseSelector) -> Any:
         if self.app.sock is None:
             return None
         sock = self.app.sock.sock
