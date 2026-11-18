@@ -36,7 +36,7 @@ from ._logging import (
     dump,
     trace,
 )
-from ._socket import DEFAULT_SOCKET_OPTION, recv_line, send
+from ._socket import DEFAULT_SOCKET_OPTION, _send_all, recv_line
 from ._ssl_compat import HAVE_SSL, ssl
 from ._url import get_proxy_info, parse_url
 
@@ -433,7 +433,7 @@ def _tunnel(sock: socket.socket, host: str, port: int, auth: Any) -> socket.sock
     connect_header += "\r\n"
     dump("request header", _redact_headers(connect_header))
 
-    send(sock, connect_header)
+    _send_all(sock, connect_header)
 
     try:
         status, _, _ = read_headers(sock)

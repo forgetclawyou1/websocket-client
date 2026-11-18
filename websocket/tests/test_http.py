@@ -233,6 +233,27 @@ class HttpTest(unittest.TestCase):
                         "Proxy-Authorization: Basic dXNlcjpwYXNz\r\n\r\n",
                     )
 
+    def test_tunnel_sends_whole_request_in_partial_chunks(self):
+        """A CONNECT request bigger than one sock.send() chunk must still
+        arrive whole (N49)."""
+
+        class CappedSock(SockMock):
+            def __init__(self, cap):
+                super().__init__()
+                self.cap = cap
+
+            def send(self, data):
+                self.sent.append(data[: self.cap])
+                return self.cap
+
+        sock = CappedSock(cap=8)
+        sock.add_packet(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+        self.assertIs(_tunnel(sock, "example.com", 443, None), sock)
+        self.assertEqual(
+            b"".join(sock.sent).decode("ascii"),
+            "CONNECT example.com:443 HTTP/1.1\r\n" "Host: example.com:443\r\n\r\n",
+        )
+
     def test_tunnel_basic_auth_keeps_colon_for_empty_password(self):
         """RFC 7617 user-pass is user-id ":" password, also when the password
         is empty; a URL without a password gives ("user", "")."""
@@ -396,13 +417,12 @@ class HttpTest(unittest.TestCase):
         ssl_wrapped_socket.close.assert_not_called()
 
         fake_sock = mock.Mock()
-        with mock.patch("websocket._http.send") as send_mock, mock.patch(
+        with mock.patch("websocket._http._send_all"), mock.patch(
             "websocket._http.read_headers", return_value=(200, {}, "OK")
         ):
             returned = _tunnel(fake_sock, "endpoint", 9000, ("demo", "secret"))
 
         self.assertIs(returned, fake_sock)
-        send_mock.assert_called_once()
 
     def test_proxy_connect_closes_socket_on_tls_configuration_error(self):
         options = OptsList()
@@ -725,13 +745,11 @@ class HttpPureUnitTests(unittest.TestCase):
     def test_tunnel_raises_for_non_200(self):
         fake_socket = object()
 
-        with mock.patch("websocket._http.send") as send_mock, mock.patch(
+        with mock.patch("websocket._http._send_all"), mock.patch(
             "websocket._http.read_headers", return_value=(403, {}, "Forbidden")
         ):
             with self.assertRaises(WebSocketProxyException):
                 _tunnel(fake_socket, "example.com", 443, ("user", "pass"))
-
-        send_mock.assert_called()
 
 
 if __name__ == "__main__":

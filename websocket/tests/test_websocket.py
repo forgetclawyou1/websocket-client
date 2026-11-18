@@ -24,6 +24,7 @@ from websocket._exceptions import (
     WebSocketException,
 )
 from websocket._handshake import CookieJar
+from websocket._handshake import handshake
 from websocket._handshake import _create_sec_websocket_key
 from websocket._handshake import _validate as _validate_header
 from websocket._handshake import _get_handshake_headers
@@ -524,6 +525,39 @@ class UtilsTest(unittest.TestCase):
 
 
 class HandshakeTest(unittest.TestCase):
+    def test_handshake_sends_whole_request_in_partial_chunks(self):
+        """A request with a large header must still arrive whole when
+        sock.send() accepts only a little at a time (N49)."""
+
+        class CappedSock(SockMock):
+            def __init__(self, cap):
+                super().__init__()
+                self.cap = cap
+
+            def send(self, data):
+                self.sent.append(data[: self.cap])
+                return self.cap
+
+        sock = CappedSock(cap=7)
+        sock.add_packet(
+            b"HTTP/1.1 101 Switching Protocols\r\n"
+            b"Connection: Upgrade\r\n"
+            b"Upgrade: websocket\r\n"
+            b"Sec-WebSocket-Accept: Kxep+hNu9n51529fGidYu7a3wO0=\r\n\r\n"
+        )
+        big = "X-Big: " + "a" * 5000
+        with mock.patch(
+            "websocket._handshake._create_sec_websocket_key",
+            return_value="c6b8hTg4EeGb2gQMztV1/g==",
+        ):
+            resp = handshake(
+                sock, "ws://example.com/", "example.com", 80, "/", header=[big]
+            )
+        self.assertEqual(resp.status, 101)
+        request = b"".join(sock.sent).decode()
+        self.assertIn(big, request)
+        self.assertTrue(request.endswith("\r\n\r\n"))
+
     def test_connect_ignores_invalid_cookie(self):
         sock = SockMock()
         sock.add_packet(

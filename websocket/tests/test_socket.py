@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import Mock, patch, MagicMock
 import time
 
-from websocket._socket import recv, recv_line, send, DEFAULT_SOCKET_OPTION
+from websocket._socket import _send_all, recv, recv_line, send, DEFAULT_SOCKET_OPTION
 from websocket.tests._fakes import FakeSelector
 from websocket._ssl_compat import (
     SSLError,
@@ -487,6 +487,40 @@ class SocketTest(unittest.TestCase):
             send(mock_sock, b"payload")
 
         self.assertIn("timed out", str(cm.exception))
+
+    def test_send_all_sends_everything_in_partial_chunks(self):
+        """sock.send() may accept only part of the data: _send_all() must send
+        the rest (a truncated handshake or CONNECT request is rejected by the
+        server) and must not spin when a socket reports zero progress. The
+        public send() keeps returning the partial count for callers that loop
+        themselves."""
+
+        class CappedSock:
+            def __init__(self, cap):
+                self.cap = cap
+                self.sent = []
+                self.calls = 0
+
+            def send(self, data):
+                self.calls += 1
+                n = min(len(data), self.cap)
+                self.sent.append(bytes(data[:n]))
+                return n
+
+            def gettimeout(self):
+                return 2
+
+        payload = b"x" * 65536
+        self.assertEqual(send(CappedSock(cap=8192), payload), 8192)
+
+        sock = CappedSock(cap=8192)
+        self.assertEqual(_send_all(sock, payload), 65536)
+        self.assertEqual(b"".join(sock.sent), payload)
+
+        stuck = CappedSock(cap=0)
+        with self.assertRaises(WebSocketConnectionClosedException):
+            _send_all(stuck, b"payload")
+        self.assertEqual(stuck.calls, 1)
 
 
 if __name__ == "__main__":

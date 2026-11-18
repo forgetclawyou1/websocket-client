@@ -244,3 +244,22 @@ def send(sock: socket.socket, data: Union[bytes, str]) -> int:
             raise WebSocketTimeoutException(message)
         else:
             raise
+
+
+def _send_all(sock: socket.socket, data: Union[bytes, str]) -> int:
+    """send() until all of data is written. One sock.send() may accept only
+    part of a large request (a big header against a slow reader), and the
+    handshake and CONNECT requests must not be truncated. WebSocket frames
+    do not need this: send_frame() loops over send() itself."""
+    if isinstance(data, str):
+        data = data.encode("utf-8")
+    total = 0
+    while True:
+        # data[total:] is data itself until the first partial send
+        sent = send(sock, data[total:])
+        total += sent
+        if total >= len(data):
+            return total
+        if not sent:
+            # No progress: another call would spin on the same data.
+            raise WebSocketConnectionClosedException("socket is already closed.")

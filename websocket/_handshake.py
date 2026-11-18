@@ -29,7 +29,7 @@ from ._cookiejar import SimpleCookieJar
 from ._exceptions import WebSocketException, WebSocketBadStatusException
 from ._http import read_headers
 from ._logging import _redact_headers, dump, error
-from ._socket import send
+from ._socket import _send_all
 
 __all__ = ["handshake_response", "handshake", "SUPPORTED_REDIRECT_STATUSES"]
 
@@ -73,7 +73,7 @@ def handshake(
     headers, key = _get_handshake_headers(resource, url, hostname, port, options)
 
     header_str = "\r\n".join(headers)
-    send(sock, header_str)
+    _send_all(sock, header_str)
     dump("request header", _redact_headers(header_str))
 
     status, resp = _get_resp_headers(sock)
