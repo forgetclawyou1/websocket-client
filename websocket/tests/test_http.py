@@ -49,9 +49,9 @@ limitations under the License.
 """
 
 try:
-    from python_socks._errors import ProxyConnectionError, ProxyError, ProxyTimeoutError
+    from python_socks._errors import ProxyConnectionError, ProxyTimeoutError
 except:
-    from websocket._http import ProxyConnectionError, ProxyError, ProxyTimeoutError
+    from websocket._http import ProxyConnectionError, ProxyTimeoutError
 
 # Skip test to access the internet unless TEST_WITH_INTERNET == 1
 TEST_WITH_INTERNET = os.environ.get("TEST_WITH_INTERNET", "0") == "1"
@@ -230,6 +230,27 @@ class HttpTest(unittest.TestCase):
                         f"Host: {expected_host}:{port}\r\n"
                         "Proxy-Authorization: Basic dXNlcjpwYXNz\r\n\r\n",
                     )
+
+    def test_proxy_info_defaults_and_validates_proxy_type(self):
+        """An explicit None (run_forever always passes it) means "http"; only
+        a real value is validated, and the error lists all five protocols."""
+        cfg = proxy_info(http_proxy_host="127.0.0.1", http_proxy_port=9999)
+        self.assertEqual(cfg.proxy_protocol, "http")
+
+        cfg = proxy_info(
+            http_proxy_host="127.0.0.1", http_proxy_port=9999, proxy_type=None
+        )
+        self.assertEqual(cfg.proxy_protocol, "http")
+
+        with self.assertRaisesRegex(
+            WebSocketProxyException,
+            "Only http, socks4, socks4a, socks5, socks5h proxy protocols",
+        ):
+            proxy_info(
+                http_proxy_host="127.0.0.1",
+                http_proxy_port=9999,
+                proxy_type="",
+            )
 
     def test_connect(self):
         # Test proxy error handling without requiring internet - using fast local addresses and short timeouts
@@ -447,7 +468,7 @@ class HttpTest(unittest.TestCase):
             "http",
         )
         self.assertRaises(
-            ProxyError,
+            WebSocketProxyException,
             proxy_info,
             http_proxy_host="127.0.0.1",
             http_proxy_port="8080",

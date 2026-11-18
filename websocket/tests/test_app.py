@@ -1214,6 +1214,72 @@ class WebSocketAppUnitTests(unittest.TestCase):
         app.run_forever()
         self.assertEqual(len(target_hits), 1)
 
+    def test_run_forever_http_proxy_without_proxy_type(self):
+        """run_forever(http_proxy_host=...) reaches an HTTP proxy without an
+        explicit proxy_type (it always passes proxy_type=None, which used to
+        be rejected as an unsupported protocol)."""
+        srv = socket.socket()
+        srv.bind(("127.0.0.1", 0))
+        srv.listen()
+        srv.settimeout(5)
+        connect_lines = []
+
+        def proxy():
+            try:
+                conn, _ = srv.accept()
+                with conn:
+                    conn.settimeout(5)
+                    request = b""
+                    while b"\r\n\r\n" not in request:
+                        request += conn.recv(4096)
+                    connect_lines.append(request.split(b"\r\n", 1)[0])
+                    conn.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+
+                    request = b""
+                    while b"\r\n\r\n" not in request:
+                        request += conn.recv(4096)
+                    key = next(
+                        line.split(b":", 1)[1].strip()
+                        for line in request.split(b"\r\n")
+                        if line.lower().startswith(b"sec-websocket-key:")
+                    )
+                    accept = base64.b64encode(
+                        hashlib.sha1(
+                            key + b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+                        ).digest()
+                    )
+                    conn.sendall(
+                        b"HTTP/1.1 101 Switching Protocols\r\n"
+                        b"Upgrade: websocket\r\nConnection: Upgrade\r\n"
+                        b"Sec-WebSocket-Accept: " + accept + b"\r\n\r\n"
+                    )
+                    # The client closes from on_open; echo its CLOSE frame
+                    # (2 header bytes, 4 mask bytes, 2 code bytes).
+                    close_frame = b""
+                    while len(close_frame) < 8:
+                        close_frame += conn.recv(4096)
+                    conn.sendall(close_frame)
+            except OSError:
+                pass
+
+        threading.Thread(target=proxy, daemon=True).start()
+        self.addCleanup(srv.close)
+        proxy_port = srv.getsockname()[1]
+
+        events = []
+        errors = []
+        app = ws.WebSocketApp(
+            "ws://127.0.0.1:9/",
+            on_open=lambda _app: (events.append("open"), _app.close()),
+            on_close=lambda _app, status, _msg: events.append(status),
+            on_error=lambda _app, e: errors.append(e),
+        )
+        app.run_forever(http_proxy_host="127.0.0.1", http_proxy_port=proxy_port)
+
+        self.assertEqual(connect_lines, [b"CONNECT 127.0.0.1:9 HTTP/1.1"])
+        self.assertEqual(events, ["open", 1000])
+        self.assertEqual(errors, [])
+
     def test_run_forever_rejects_when_socket_already_open(self):
         app = self._build_app()
         app.sock = object()
