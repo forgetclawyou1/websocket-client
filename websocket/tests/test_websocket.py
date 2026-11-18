@@ -1706,6 +1706,40 @@ class WebSocketCoreUnitTests(unittest.TestCase):
         sock.abort()
         socket_mock.shutdown.assert_called_once_with(socket.SHUT_RDWR)
 
+        # a wrapper without _closed (the socket= option): close must run (N48)
+        socket_mock = mock.Mock(spec=["close"])
+        sock.sock = socket_mock
+        sock.connected = True
+        sock.shutdown()
+        socket_mock.close.assert_called_once()
+        self.assertIsNone(sock.sock)
+
+    def test_shutdown_closes_wrapper_socket_and_peer_sees_eof(self):
+        class Wrapped:
+            """A socket-like transport without CPython's private _closed."""
+
+            def __init__(self, s):
+                self._s = s
+
+            def __getattr__(self, name):
+                if name == "_closed":
+                    raise AttributeError(name)
+                return getattr(self._s, name)
+
+        ours, peer = socket.socketpair()
+        self.addCleanup(peer.close)
+        peer.settimeout(2)
+        sock = ws.WebSocket()
+        sock.sock = Wrapped(ours)
+        sock.connected = True
+
+        sock.shutdown()
+
+        self.assertIsNone(sock.sock)
+        self.assertFalse(sock.connected)
+        self.assertEqual(ours.fileno(), -1)
+        self.assertEqual(peer.recv(1), b"")  # the peer sees EOF, not a leak
+
     def test_abort_tolerates_dead_socket(self):
         sock = ws.WebSocket()
         # never-connected socket: shutdown() raises ENOTCONN

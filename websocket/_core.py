@@ -758,9 +758,10 @@ class WebSocket:
         """
         if self.sock:
             try:
-                # Check if socket is still open before closing
-                if not self.sock._closed:
-                    self.sock.close()
+                # No _closed pre-check: close() is idempotent for real
+                # sockets, and skipping it for a socket-like object passed
+                # with socket= would leak it.
+                self.sock.close()
             except (OSError, AttributeError):
                 # Socket already closed or invalid file descriptor - this can happen
                 # during reconnection scenarios when network failures occur

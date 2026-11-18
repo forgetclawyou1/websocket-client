@@ -33,21 +33,21 @@ class ReconnectBadFileDescriptorTest(unittest.TestCase):
         self.assertIsNone(ws.sock)
         self.assertFalse(ws.connected)
 
-    def test_shutdown_with_closed_socket_attribute(self):
-        """Test shutdown() when socket's _closed attribute is True"""
+    def test_shutdown_closes_socket_marked_closed(self):
+        """close() is called even when _closed is already True: it is
+        idempotent for real sockets, and skipping it would leak a
+        socket-like object whose _closed only reflects the transport
+        underneath."""
         ws = CoreWebSocket()
 
-        # Create a mock socket that's already closed
         mock_sock = Mock()
         mock_sock._closed = True
         ws.sock = mock_sock
         ws.connected = True
 
-        # shutdown() should not call close() on already closed socket
         ws.shutdown()
 
-        # Verify close() was not called and cleanup happened
-        mock_sock.close.assert_not_called()
+        mock_sock.close.assert_called_once()
         self.assertIsNone(ws.sock)
         self.assertFalse(ws.connected)
 
