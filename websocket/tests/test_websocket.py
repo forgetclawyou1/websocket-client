@@ -1,9 +1,11 @@
 # -*- coding: utf-8 -*-
 #
+import copy
 import io
 import logging
 import os
 import os.path
+import pickle
 import socket
 import struct
 import threading
@@ -646,6 +648,55 @@ class HandshakeTest(unittest.TestCase):
         self.assertEqual(exc.status_message, "Not Found")
         self.assertIsNone(exc.resp_headers)
         self.assertIsNone(exc.resp_body)
+
+    def test_bad_status_exception_survives_pickle_and_copy(self):
+        """Pickling (how a ProcessPoolExecutor worker's exception reaches the
+        parent) and copying keep the type, the message and every field (N52),
+        plus any other attribute, as for other exceptions."""
+        exc = WebSocketBadStatusException(
+            "Handshake status 403 Forbidden",
+            403,
+            "Forbidden",
+            {"x-reason": "banned"},
+            b"banned",
+        )
+        exc.extra = "kept"
+        for name, clone in (
+            ("pickle", lambda e: pickle.loads(pickle.dumps(e))),
+            ("copy", copy.copy),
+            ("deepcopy", copy.deepcopy),
+        ):
+            with self.subTest(name):
+                other = clone(exc)
+                self.assertIs(type(other), WebSocketBadStatusException)
+                self.assertEqual(str(other), "Handshake status 403 Forbidden")
+                self.assertEqual(other.args, exc.args)
+                self.assertEqual(
+                    (
+                        other.status_code,
+                        other.status_message,
+                        other.resp_headers,
+                        other.resp_body,
+                        other.extra,
+                    ),
+                    (403, "Forbidden", {"x-reason": "banned"}, b"banned", "kept"),
+                )
+
+        # A subclass that inherits __init__ is copied with its fields; one with
+        # its own __init__ is still rebuilt from its args, as before.
+        class Inherited(WebSocketBadStatusException):
+            pass
+
+        class OwnInit(WebSocketBadStatusException):
+            def __init__(self, message):
+                super().__init__(message, 500)
+
+        other = copy.copy(Inherited("m", 403, resp_body=b"x"))
+        self.assertIs(type(other), Inherited)
+        self.assertEqual((other.status_code, other.resp_body), (403, b"x"))
+        other = copy.copy(OwnInit("m"))
+        self.assertIs(type(other), OwnInit)
+        self.assertEqual(other.status_code, 500)
 
     @unittest.skipUnless(TEST_WITH_INTERNET, "Internet-requiring tests are disabled")
     def test_http_ssl(self):

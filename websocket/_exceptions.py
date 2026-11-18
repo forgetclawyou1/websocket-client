@@ -17,7 +17,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 
 class WebSocketException(Exception):
@@ -87,6 +87,26 @@ class WebSocketBadStatusException(WebSocketException):
         self.status_message = status_message
         self.resp_headers = resp_headers
         self.resp_body = resp_body
+
+    def __reduce__(self) -> Union[str, tuple[Any, ...]]:
+        # The default rebuilds the exception from self.args, which holds only
+        # the message, so pickling it (e.g. back from a ProcessPoolExecutor
+        # worker) and copying it raised TypeError. Pass every constructor
+        # argument; __dict__ keeps any other attributes, as the default does.
+        # A subclass with its own __init__ keeps the default.
+        if type(self).__init__ is not WebSocketBadStatusException.__init__:
+            return super().__reduce__()
+        return (
+            self.__class__,
+            (
+                self.args[0],
+                self.status_code,
+                self.status_message,
+                self.resp_headers,
+                self.resp_body,
+            ),
+            self.__dict__,
+        )
 
 
 class WebSocketAddressException(WebSocketException):
