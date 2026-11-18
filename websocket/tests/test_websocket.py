@@ -1785,6 +1785,48 @@ class WebSocketCoreUnitTests(unittest.TestCase):
         sock.abort()  # must not raise
         real.close()
 
+    def test_send_raises_when_the_socket_makes_no_progress(self):
+        """A blocking or timed transport whose send() returns 0 (a paramiko
+        channel after abort() shut its write side) must make send() raise
+        instead of retrying the same bytes forever. A non-blocking transport
+        may return 0 for "would block" (gevent's SSL sockets): that send keeps
+        retrying and completes."""
+
+        class ZeroSend:
+            def __init__(self, timeout, zeros):
+                self.timeout = timeout
+                self.zeros = zeros
+                self.calls = 0
+                self.sent = b""
+
+            def send(self, data):
+                self.calls += 1
+                if self.calls > 100:  # a regression must fail, not hang
+                    raise RuntimeError("send() kept retrying")
+                if self.calls <= self.zeros:
+                    return 0
+                self.sent += data
+                return len(data)
+
+            def gettimeout(self):
+                return self.timeout
+
+        for timeout in (None, 1):
+            with self.subTest(timeout=timeout):
+                sock = ws.WebSocket()
+                sock.sock = ZeroSend(timeout, zeros=100)
+                sock.connected = True
+                with self.assertRaises(ws.WebSocketConnectionClosedException):
+                    sock.send("x")
+                self.assertEqual(sock.sock.calls, 1)
+
+        sock = ws.WebSocket()
+        sock.sock = ZeroSend(0, zeros=3)
+        sock.connected = True
+        self.assertEqual(sock.send("x"), 7)  # the whole masked frame
+        self.assertEqual(sock.sock.calls, 4)
+        self.assertEqual(len(sock.sock.sent), 7)
+
     def test_abort_wakes_close_waiting_for_the_peer(self):
         """close() clears connected before it waits for the peer's CLOSE;
         abort() from another thread must still wake that wait (N47)."""

@@ -506,6 +506,17 @@ class WebSocket:
         with self.lock:
             while data:
                 bytes_sent = self._send(data)
+                if not bytes_sent:
+                    # A blocking or timed transport that made no progress never
+                    # will: a paramiko channel returns 0 once its write side is
+                    # shut down (as abort() does). A non-blocking one may
+                    # return 0 for "would block" (gevent's SSL sockets), so it
+                    # keeps retrying as before.
+                    gettimeout = getattr(self.sock, "gettimeout", None)
+                    if gettimeout is None or gettimeout() != 0:
+                        raise WebSocketConnectionClosedException(
+                            "socket is already closed."
+                        )
                 data = data[bytes_sent:]
 
         return length
