@@ -290,6 +290,27 @@ class WebSocket:
 
     headers = property(getheaders)
 
+    def _reset_connection_state(self, keep: Optional[socket.socket] = None) -> None:
+        """Forget everything a previous connection left, so a WebSocket can be
+        reused: close its socket (unless it is ``keep``, the socket the new
+        connection is handed), and drop its handshake data, CLOSE frame and any
+        partly received frame or fragmented message."""
+        old_sock, self.sock = self.sock, None
+        self.connected = False
+        if old_sock is not None and old_sock is not keep:
+            try:
+                old_sock.close()
+            except OSError:
+                pass
+        self.handshake_response = None
+        self.close_frame = None
+        self.frame_buffer = frame_buffer(
+            self._recv, self.frame_buffer.skip_utf8_validation
+        )
+        self.cont_frame = continuous_frame(
+            self.cont_frame.fire_cont_frame, self.cont_frame.skip_utf8_validation
+        )
+
     def connect(self, url, **options):
         """
         Connect to url. url is websocket url scheme.
@@ -351,11 +372,14 @@ class WebSocket:
             raise WebSocketException("Ensure redirect_limit is an integer")
         self.sock_opt.timeout = options.get("timeout", self.sock_opt.timeout)
         caller_socket = options.pop("socket", None)
+        # Reject a bad URL or proxy option before touching the current
+        # connection; parse_url raises the same ValueError connect() would.
+        parse_url(url)
+        proxy = proxy_info(**options)
+        self._reset_connection_state(keep=caller_socket)
         if caller_socket is not None and options.get("timeout") is not None:
             caller_socket.settimeout(options["timeout"])
-        self.sock, addrs = connect(
-            url, self.sock_opt, proxy_info(**options), caller_socket
-        )
+        self.sock, addrs = connect(url, self.sock_opt, proxy, caller_socket)
 
         try:
             self.handshake_response = handshake(self.sock, url, *addrs, **options)

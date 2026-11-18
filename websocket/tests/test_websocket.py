@@ -17,7 +17,7 @@ from unittest import mock
 import websocket as ws
 from websocket._abnf import ABNF
 from websocket._cookiejar import SimpleCookieJar
-from websocket.tests._fakes import HeaderSockMock, SockMock
+from websocket.tests._fakes import FakePeer, HeaderSockMock, SockMock
 from websocket._exceptions import (
     WebSocketBadStatusException,
     WebSocketAddressException,
@@ -1290,6 +1290,106 @@ class WebSocketCoreUnitTests(unittest.TestCase):
         self.assertIsNone(sock.sock)
         for socket_mock in sockets:
             socket_mock.close.assert_called_once()
+
+    def _reuse_peer(self, status=101):
+        """A FakePeer whose handshake answer is already queued, for the
+        suite's fixed key (patched by the caller). recv_line reads one byte
+        at a time, so frames queued after the answer are not swallowed."""
+        peer = FakePeer()
+        self.addCleanup(peer.close)
+        if status == 101:
+            peer.send_raw(
+                b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n"
+                b"Connection: Upgrade\r\n"
+                b"Sec-WebSocket-Accept: Kxep+hNu9n51529fGidYu7a3wO0=\r\n\r\n"
+            )
+        else:
+            peer.send_raw(b"HTTP/1.1 %d Nope\r\nContent-Length: 0\r\n\r\n" % status)
+        return peer
+
+    def test_reconnect_starts_from_a_clean_state(self):
+        """Reusing a WebSocket must not carry frame state, the socket or the
+        handshake data over from the previous connection (N46, N153)."""
+        key_patch = mock.patch(
+            "websocket._handshake._create_sec_websocket_key",
+            return_value="c6b8hTg4EeGb2gQMztV1/g==",
+        )
+        key_patch.start()
+        self.addCleanup(key_patch.stop)
+
+        # A timeout after one header byte, or inside a fragmented message,
+        # then close() and connect() again: the new server's frame is read.
+        for leftover in (
+            b"\x81",
+            ABNF(0, 0, 0, 0, ABNF.OPCODE_TEXT, 0, b"ab").format(),
+        ):
+            with self.subTest(leftover=leftover):
+                sock = ws.WebSocket()
+                first = self._reuse_peer()
+                sock.connect("ws://example.com/", socket=first.client, timeout=0.2)
+                first.send_raw(leftover)
+                with self.assertRaises(ws.WebSocketTimeoutException):
+                    sock.recv()
+                sock.close(timeout=0.2)
+
+                second = self._reuse_peer()
+                sock.connect("ws://example.com/", socket=second.client, timeout=1)
+                second.send_frame(ABNF.OPCODE_TEXT, b"hello")
+                self.assertEqual(sock.recv(), "hello")
+                sock.shutdown()
+
+        # connect() over a live connection closes the old socket.
+        sock = ws.WebSocket()
+        first = self._reuse_peer()
+        sock.connect("ws://example.com/", socket=first.client, timeout=1)
+        second = self._reuse_peer()
+        sock.connect("ws://example.com/", socket=second.client, timeout=1)
+        self.assertEqual(first.client.fileno(), -1)
+        while first.peer.recv(4096):  # the old server reads the request, then EOF
+            pass
+        self.assertIs(sock.sock, second.client)
+        sock.shutdown()
+
+        # A failed reconnect leaves nothing from the first connection.
+        sock = ws.WebSocket()
+        sock.connect("ws://example.com/", socket=self._reuse_peer().client, timeout=1)
+        self.assertEqual(sock.getstatus(), 101)
+        with self.assertRaises(WebSocketBadStatusException):
+            sock.connect(
+                "ws://example.com/", socket=self._reuse_peer(403).client, timeout=1
+            )
+        self.assertFalse(sock.connected)
+        self.assertIsNone(sock.sock)
+        self.assertIsNone(sock.getstatus())
+        self.assertIsNone(sock.getheaders())
+
+        # A connect() rejected for its arguments leaves a live connection
+        # untouched, as before.
+        sock = ws.WebSocket()
+        live = self._reuse_peer()
+        sock.connect("ws://example.com/", socket=live.client, timeout=1)
+        for url, options, error in (
+            ("ws://example.com/", {"timeout": True}, TypeError),
+            ("ws://example.com/", {"redirect_limit": None}, ws.WebSocketException),
+            (
+                "ws://example.com/",
+                {
+                    "http_proxy_host": "127.0.0.1",
+                    "http_proxy_port": 1,
+                    "proxy_type": "",
+                },
+                ws.WebSocketProxyException,
+            ),
+            ("http://example.com/", {}, ValueError),
+        ):
+            with self.subTest(url=url, options=options):
+                with self.assertRaises(error):
+                    sock.connect(url, **options)
+                self.assertTrue(sock.connected)
+                self.assertIs(sock.sock, live.client)
+        live.send_frame(ABNF.OPCODE_TEXT, b"still here")
+        self.assertEqual(sock.recv(), "still here")
+        sock.shutdown()
 
     def test_connect_redirect_limit_none_and_negative(self):
         """redirect_limit=None raises a clean error (it used to be a raw
