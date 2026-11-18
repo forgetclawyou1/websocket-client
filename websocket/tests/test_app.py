@@ -1166,6 +1166,10 @@ class WebSocketAppUnitTests(unittest.TestCase):
         host, and a negative limit is rejected; the default still follows it."""
         with self.assertRaises(ws.WebSocketException):
             self._build_app().run_forever(redirect_limit=-1)
+        with self.assertRaisesRegex(
+            ws.WebSocketException, "Ensure redirect_limit is an integer"
+        ):
+            self._build_app().run_forever(redirect_limit=None)
 
         def serve(reply):
             srv = socket.socket()

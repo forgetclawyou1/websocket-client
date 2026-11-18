@@ -347,6 +347,8 @@ class WebSocket:
         """
         if "timeout" in options:
             _validate_timeout(options["timeout"])
+        if options.get("redirect_limit") is None and "redirect_limit" in options:
+            raise WebSocketException("Ensure redirect_limit is an integer")
         self.sock_opt.timeout = options.get("timeout", self.sock_opt.timeout)
         caller_socket = options.pop("socket", None)
         if caller_socket is not None and options.get("timeout") is not None:

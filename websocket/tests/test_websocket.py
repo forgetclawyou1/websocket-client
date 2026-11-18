@@ -1254,6 +1254,38 @@ class WebSocketCoreUnitTests(unittest.TestCase):
         for socket_mock in sockets:
             socket_mock.close.assert_called_once()
 
+    def test_connect_redirect_limit_none_and_negative(self):
+        """redirect_limit=None raises a clean error (it used to be a raw
+        TypeError from range(None)); a negative limit keeps today's behavior:
+        no redirect is followed, so the redirect is reported as exhausted."""
+        sock = ws.WebSocket()
+        redirect_resp = handshake_response(302, {"location": "ws://redirect"}, None)
+
+        with mock.patch("websocket._core.connect") as connect_mock:
+            with self.assertRaisesRegex(
+                ws.WebSocketException, "Ensure redirect_limit is an integer"
+            ):
+                sock.connect("ws://origin", redirect_limit=None)
+        self.assertEqual(connect_mock.call_count, 0)
+        self.assertIsNone(sock.sock)
+
+        def fake_connect(url, *args, **kwargs):
+            socket_mock = mock.Mock()
+            return socket_mock, ("redirect", 80, "/")
+
+        with mock.patch(
+            "websocket._core.connect", side_effect=fake_connect
+        ) as connect_mock, mock.patch(
+            "websocket._core.handshake", return_value=redirect_resp
+        ):
+            with self.assertRaisesRegex(
+                ws.WebSocketException, "Redirect limit exhausted"
+            ):
+                sock.connect("ws://origin", redirect_limit=-1)
+        self.assertEqual(connect_mock.call_count, 1)
+        self.assertFalse(sock.connected)
+        self.assertIsNone(sock.sock)
+
     def test_connect_redirect_invalid_target_raises(self):
         sock = ws.WebSocket()
         redirect_resp = handshake_response(302, {"location": "https://redirect"}, None)

@@ -398,6 +398,8 @@ class WebSocketApp:
             raise WebSocketException("Ensure ping_interval is a number")
         if ping_timeout and ping_interval and ping_interval <= ping_timeout:
             raise WebSocketException("Ensure ping_interval > ping_timeout")
+        if redirect_limit is None:
+            raise WebSocketException("Ensure redirect_limit is an integer")
         if redirect_limit < 0:
             raise WebSocketException("Ensure redirect_limit >= 0")
         if not sockopt:
