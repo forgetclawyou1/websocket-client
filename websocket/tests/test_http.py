@@ -233,6 +233,32 @@ class HttpTest(unittest.TestCase):
                         "Proxy-Authorization: Basic dXNlcjpwYXNz\r\n\r\n",
                     )
 
+    def test_tunnel_basic_auth_keeps_colon_for_empty_password(self):
+        """RFC 7617 user-pass is user-id ":" password, also when the password
+        is empty; a URL without a password gives ("user", "")."""
+        with mock.patch.dict(
+            os.environ, {"http_proxy": "http://user@proxy.local:3128"}, clear=True
+        ):
+            env_auth = websocket._url.get_proxy_info("example.com", False)[2]
+        self.assertEqual(env_auth, ("user", ""))
+
+        for auth, expected in (
+            (env_auth, "Proxy-Authorization: Basic dXNlcjo=\r\n"),  # user:
+            (("user", None), "Proxy-Authorization: Basic dXNlcjo=\r\n"),
+            (("user", "pass"), "Proxy-Authorization: Basic dXNlcjpwYXNz\r\n"),
+            (("", "pass"), ""),
+            (None, ""),
+        ):
+            with self.subTest(auth=auth):
+                sock = SockMock()
+                sock.add_packet(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                _tunnel(sock, "example.com", 443, auth)
+                self.assertEqual(
+                    b"".join(sock.sent).decode("ascii"),
+                    "CONNECT example.com:443 HTTP/1.1\r\n"
+                    "Host: example.com:443\r\n" + expected + "\r\n",
+                )
+
     def test_proxy_info_defaults_and_validates_proxy_type(self):
         """An explicit None (run_forever always passes it) means "http"; only
         a real value is validated, and the error lists all five protocols."""

@@ -423,9 +423,11 @@ def _tunnel(sock: socket.socket, host: str, port: int, auth: Any) -> socket.sock
 
     # TODO: support digest auth.
     if auth and auth[0]:
-        auth_str = auth[0]
+        # RFC 7617: user-pass = user-id ":" password, so the colon is sent
+        # even when the password is empty (as curl and urllib do).
+        auth_str = auth[0] + ":"
         if auth[1]:
-            auth_str += f":{auth[1]}"
+            auth_str += f"{auth[1]}"
         encoded_str = base64encode(auth_str.encode()).strip().decode().replace("\n", "")
         connect_header += f"Proxy-Authorization: Basic {encoded_str}\r\n"
     connect_header += "\r\n"
