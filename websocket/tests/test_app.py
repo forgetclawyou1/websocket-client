@@ -786,6 +786,57 @@ class WebSocketAppTest(unittest.TestCase):
         self.assertLess(time.monotonic() - start, 1)
         self.assertEqual(closes, [None])
 
+    def test_close_while_connecting_is_not_an_error(self):
+        """app.close() before the handshake completes (N61) or inside on_open
+        (N164) is the requested close: no on_error, one on_close, and
+        run_forever returns False."""
+
+        def slow_handshake(fake):  # answer after 0.8 s; echo a late CLOSE
+            time.sleep(0.8)
+            try:
+                answer_handshake_then_echo_close(fake)
+            except (OSError, ws.WebSocketException):
+                pass  # the client closed during the delay, as intended
+
+        def close_soon(app):
+            time.sleep(0.1)
+            app.close()
+
+        cases = {  # case: (server, on_close code)
+            # close() inside on_open
+            "on_open": (answer_handshake_then_echo_close, 1000),
+            # close() from another thread while the server is slow to answer
+            "handshake": (slow_handshake, None),
+            # close() after the socket object exists but before connect():
+            # header() runs in between, and the connection is then closed
+            "before_connect": (answer_handshake_then_echo_close, 1000),
+        }
+        for name, (serve, code) in cases.items():
+            with self.subTest(case=name):
+                fake = FakePeer(timeout=5)
+                self.addCleanup(fake.close)
+                threading.Thread(target=serve, args=(fake,), daemon=True).start()
+                events = []
+                app = ws.WebSocketApp(
+                    "ws://example.com/",
+                    socket=fake.client,
+                    on_error=lambda app, e: events.append(("error", repr(e))),
+                    on_close=lambda app, c, r: events.append(("close", c)),
+                )
+                if name == "on_open":
+                    app.on_open = lambda app: app.close()
+                elif name == "before_connect":
+                    app.header = lambda: app.close() or []
+                else:
+                    threading.Thread(
+                        target=close_soon, args=(app,), daemon=True
+                    ).start()
+                start = time.monotonic()
+                self.assertIs(app.run_forever(), False)
+                self.assertLess(time.monotonic() - start, 2)
+                self.assertEqual(events, [("close", code)])
+                self.assertIsNone(app.sock)
+
     def test_close_during_reconnect_backoff_ends_run(self):
         """close() while run_forever waits to reconnect (N59) must end the run
         within a fraction of a second: no new connection, no on_reconnect,

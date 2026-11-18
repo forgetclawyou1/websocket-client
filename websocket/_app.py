@@ -195,21 +195,24 @@ class WebSocketApp:
             Operation code of data. Default is OPCODE_TEXT.
         """
 
-        if not self.sock or self.sock.send(data, opcode) == 0:
+        sock = self.sock  # read once: close() in another thread clears it
+        if not sock or sock.send(data, opcode) == 0:
             raise WebSocketConnectionClosedException("Connection is already closed.")
 
     def send_text(self, text_data: str) -> None:
         """
         Sends UTF-8 encoded text.
         """
-        if not self.sock or self.sock.send(text_data, ABNF.OPCODE_TEXT) == 0:
+        sock = self.sock
+        if not sock or sock.send(text_data, ABNF.OPCODE_TEXT) == 0:
             raise WebSocketConnectionClosedException("Connection is already closed.")
 
     def send_bytes(self, data: Union[bytes, bytearray]) -> None:
         """
         Sends a sequence of bytes.
         """
-        if not self.sock or self.sock.send(data, ABNF.OPCODE_BINARY) == 0:
+        sock = self.sock
+        if not sock or sock.send(data, ABNF.OPCODE_BINARY) == 0:
             raise WebSocketConnectionClosedException("Connection is already closed.")
 
     def close(self, **kwargs: Any) -> None:
@@ -471,7 +474,8 @@ class WebSocketApp:
             # Reset close frame to avoid stale data from previous connections
             self.last_close_frame = None
 
-            self.sock = WebSocket(
+            # A local reference: close() in another thread clears self.sock.
+            sock = self.sock = WebSocket(
                 self.get_mask_key,
                 sockopt=sockopt,
                 sslopt=sslopt,
@@ -481,12 +485,13 @@ class WebSocketApp:
                 dispatcher=dispatcher,
             )
 
-            self.sock.settimeout(getdefaulttimeout())
+            sock.settimeout(getdefaulttimeout())
+            reading = False
             try:
                 used_socket = self.prepared_socket
                 header = self.header() if callable(self.header) else self.header
 
-                self.sock.connect(
+                sock.connect(
                     self.url,
                     header=header,
                     cookie=self.cookie,
@@ -515,8 +520,19 @@ class WebSocketApp:
                 else:
                     self._callback(self.on_open)
 
+                if not self.keep_running:
+                    # close() in on_open, or in another thread during the
+                    # handshake: the run is over. close() may have found no
+                    # socket yet, so close this one; a closed one is a no-op.
+                    sock.close()
+                    if sock.close_frame is not None:
+                        self.last_close_frame = sock.close_frame
+                    teardown()
+                    return
+
                 assert dispatcher is not None
-                dispatcher.read(self.sock.sock, read, check)
+                reading = True
+                dispatcher.read(sock.sock, read, check)
             except (
                 WebSocketConnectionClosedException,
                 ConnectionRefusedError,
@@ -524,6 +540,11 @@ class WebSocketApp:
                 SystemExit,
                 Exception,
             ) as e:
+                if not (self.keep_running or reading) and isinstance(e, Exception):
+                    # close() during the handshake shut the socket under
+                    # connect(): that is the requested close, not an error.
+                    teardown()
+                    return
                 handleDisconnect(e)
 
         def read() -> bool:
