@@ -17,7 +17,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-import errno
 import os
 import socket
 import sys
@@ -232,43 +231,37 @@ def _get_addrinfo_list(
 
 
 def _open_socket(addrinfo_list, sockopt, timeout):
+    # Try each address in turn, like socket.create_connection(): any OSError
+    # (timeout, EHOSTUNREACH, EAFNOSUPPORT, a socket option the address family
+    # rejects, ...) moves on to the next address, and the last error is raised
+    # when none works. The socket is closed on every failure.
     err = None
     for addrinfo in addrinfo_list:
         family, socktype, proto = addrinfo[:3]
-        sock = socket.socket(family, socktype, proto)
-        sock.settimeout(timeout)
-        for opts in DEFAULT_SOCKET_OPTION:
-            sock.setsockopt(*opts)
-        for opts in sockopt:
-            sock.setsockopt(*opts)
-
         address = addrinfo[4]
-        err = None
-        while not err:
-            try:
-                sock.connect(address)
-            except socket.error as error:
+        sock = None
+        try:
+            sock = socket.socket(family, socktype, proto)
+            sock.settimeout(timeout)
+            for opts in DEFAULT_SOCKET_OPTION:
+                sock.setsockopt(*opts)
+            for opts in sockopt:
+                sock.setsockopt(*opts)
+            sock.connect(address)
+        except OSError as error:
+            if sock is not None:
                 sock.close()
-                error.remote_ip = str(address[0])  # type: ignore[attr-defined]
-                eConnRefused = (
-                    errno.ECONNREFUSED,
-                    getattr(errno, "WSAECONNREFUSED", errno.ECONNREFUSED),
-                    errno.ENETUNREACH,
-                )
-                if error.errno not in eConnRefused:
-                    raise error
-                err = error
-                continue
-            else:
-                break
-        else:
+            error.remote_ip = str(address[0])  # type: ignore[attr-defined]
+            err = error
             continue
-        break
-    else:
-        if err:
-            raise err
-
-    return sock
+        except BaseException:
+            if sock is not None:
+                sock.close()
+            raise
+        return sock
+    # connect() never passes an empty list (it raises "Host not found").
+    assert err is not None
+    raise err
 
 
 def _sslopt_check_hostname(sslopt: dict) -> Optional[bool]:

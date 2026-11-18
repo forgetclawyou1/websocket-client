@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 #
+import errno
 import io
 import logging
 import os
@@ -19,6 +20,7 @@ from websocket._exceptions import (
 )
 from websocket._http import (
     _get_addrinfo_list,
+    _open_socket,
     _start_proxied_socket,
     _tunnel,
     _wrap_sni_socket,
@@ -511,6 +513,115 @@ class HttpTest(unittest.TestCase):
             "my_pass321",
         )
         self.assertIsNone(proxy_info().proxy_timeout)
+
+
+class OpenSocketTest(unittest.TestCase):
+    """_open_socket tries every address, closing each failed socket."""
+
+    def setUp(self):
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        self.addCleanup(listener.close)
+        self.port = listener.getsockname()[1]
+        self.good = (
+            socket.AF_INET,
+            socket.SOCK_STREAM,
+            6,
+            "",
+            ("127.0.0.1", self.port),
+        )
+
+    def entry(self, host):
+        return (socket.AF_INET, socket.SOCK_STREAM, 6, "", (host, self.port))
+
+    def open(self, addrinfo_list, sockopt=(), failures=None):
+        """Run _open_socket with socket.socket recording each socket; failures
+        maps a creation index to (stage, exception), stage being "create",
+        "setsockopt" or "connect"."""
+        failures = failures or {}
+        created = []
+        real_socket = socket.socket
+
+        class Recording(real_socket):
+            def __init__(self, *args, **kwargs):
+                self.index = len(created)
+                stage, exc = failures.get(self.index, (None, None))
+                if stage == "create":
+                    created.append(None)
+                    raise exc
+                super().__init__(*args, **kwargs)
+                created.append(self)
+
+            def setsockopt(self, *args):
+                stage, exc = failures.get(self.index, (None, None))
+                if stage == "setsockopt" and args in list(sockopt):
+                    raise exc
+                return super().setsockopt(*args)
+
+            def connect(self, address):
+                stage, exc = failures.get(self.index, (None, None))
+                if stage == "connect":
+                    raise exc
+                return super().connect(address)
+
+        # Replace only websocket._http's view of the socket module: patching
+        # socket.socket itself would also catch sockets that other tests'
+        # server threads create in accept().
+        fake_socket_module = SimpleNamespace(**vars(socket))
+        fake_socket_module.socket = Recording
+        with mock.patch.object(websocket._http, "socket", fake_socket_module):
+            try:
+                return _open_socket(addrinfo_list, list(sockopt), 2), created
+            except BaseException as e:
+                e.created = created
+                raise
+
+    def test_tries_next_address_on_any_oserror(self):
+        tos = (socket.IPPROTO_IP, socket.IP_TOS, 0x20)
+        sock, created = self.open(
+            [
+                self.entry("192.0.2.1"),
+                self.entry("192.0.2.2"),
+                self.entry("192.0.2.3"),
+                self.entry("192.0.2.4"),
+                self.good,
+            ],
+            sockopt=[tos],
+            failures={
+                0: ("connect", TimeoutError("timed out")),
+                1: ("connect", OSError(errno.EHOSTUNREACH, "No route to host")),
+                2: ("create", OSError(errno.EAFNOSUPPORT, "not supported")),
+                3: ("setsockopt", OSError(errno.ENOPROTOOPT, "not available")),
+            },
+        )
+        self.addCleanup(sock.close)
+        self.assertEqual(sock.getpeername(), ("127.0.0.1", self.port))
+        self.assertIs(sock, created[4])
+        for failed in (created[0], created[1], created[3]):
+            self.assertEqual(failed.fileno(), -1)
+
+    def test_raises_last_error_when_every_address_fails(self):
+        with self.assertRaises(OSError) as cm:
+            self.open(
+                [self.entry("192.0.2.1"), self.entry("192.0.2.2")],
+                failures={
+                    0: ("connect", TimeoutError("timed out")),
+                    1: ("connect", OSError(errno.EHOSTUNREACH, "No route")),
+                },
+            )
+        self.assertEqual(cm.exception.errno, errno.EHOSTUNREACH)
+        self.assertEqual(cm.exception.remote_ip, "192.0.2.2")
+        self.assertTrue(all(s.fileno() == -1 for s in cm.exception.created))
+
+    def test_other_exceptions_stop_and_close_the_socket(self):
+        with self.assertRaises(KeyboardInterrupt) as cm:
+            self.open(
+                [self.entry("192.0.2.1"), self.good],
+                failures={0: ("connect", KeyboardInterrupt())},
+            )
+        self.assertEqual(len(cm.exception.created), 1)
+        self.assertEqual(cm.exception.created[0].fileno(), -1)
 
 
 class HttpPureUnitTests(unittest.TestCase):
