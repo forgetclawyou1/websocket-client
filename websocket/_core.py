@@ -742,7 +742,9 @@ class WebSocket:
         """
         Low-level asynchronous abort, wakes up other threads that are waiting in recv_*
         """
-        if self.connected and self.sock is not None:
+        # Not gated on self.connected: close() clears it before waiting for the
+        # peer's CLOSE, and abort() must be able to wake that wait too.
+        if self.sock is not None:
             try:
                 self.sock.shutdown(socket.SHUT_RDWR)
             except (OSError, AttributeError):

@@ -1717,6 +1717,30 @@ class WebSocketCoreUnitTests(unittest.TestCase):
         sock.abort()  # must not raise
         real.close()
 
+    def test_abort_wakes_close_waiting_for_the_peer(self):
+        """close() clears connected before it waits for the peer's CLOSE;
+        abort() from another thread must still wake that wait (N47)."""
+        with mock.patch(
+            "websocket._handshake._create_sec_websocket_key",
+            return_value="c6b8hTg4EeGb2gQMztV1/g==",
+        ):
+            sock = ws.WebSocket()
+            peer = self._reuse_peer()  # never answers the CLOSE
+            sock.connect("ws://example.com/", socket=peer.client, timeout=5)
+        request = b""
+        while b"\r\n\r\n" not in request:  # the client's handshake request
+            request += peer.peer.recv(4096)
+
+        closer = threading.Thread(
+            target=sock.close, kwargs={"timeout": None}, daemon=True
+        )
+        closer.start()
+        self.assertEqual(peer.read_frame()[0], ABNF.OPCODE_CLOSE)  # close() is waiting
+        sock.abort()
+        closer.join(2)
+        self.assertFalse(closer.is_alive())
+        self.assertIsNone(sock.sock)
+
     def test_create_connection_uses_custom_class(self):
         class DummySocket:
             def __init__(self, **kwargs):
